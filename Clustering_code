@@ -1,0 +1,449 @@
+
+
+
+import pandas as pd
+import numpy as np
+import nltk
+from nltk.stem.wordnet import WordNetLemmatizer
+from nltk.corpus import stopwords
+import matplotlib.pyplot as plt
+import gensim
+import nlp
+import spacy
+from nltk.corpus import wordnet
+import json as json
+import requests
+import sqlalchemy as db
+import re
+
+
+# connnect to db
+from sqlalchemy import create_engine
+from sqlalchemy import select
+conn_emp = create_engine('mssql+pymssql://username:password@HEALTHSQL2:1433/EMHP_dev').connect()
+
+
+
+#Get data
+SQL= 'SELECT * from [HCS].[dbo].[Commcare_data]' 
+SQL1 = 'SELECT *  FROM [HCS].[dbo].[CommCare_User]'
+SQL2 = r"SELECT name_and_id,Parent_case_ID  FROM [HCS].[dbo].[CommCare_Contact] WHERE exposure_date > '2021-01-01'"
+df_ccdata = pd.read_sql_query(SQL, conn_emp)
+df_user = pd.read_sql_query(SQL1, conn_hcs)
+df_contacts = pd.read_sql_query(SQL2,conn_hcs)
+
+#getting yesterday's date
+from datetime import datetime, timedelta
+yesterday = datetime.now() - timedelta(1)
+yesterday = datetime.strftime(yesterday, '%Y-%m-%d')
+
+#breaking data- w/out
+#cluster_data = df_ccdata[(df_ccdata['cluster_type'].str.contains('No_cluster') == False) & (df_ccdata['opened_on']==yesterday)]
+#no_cluster_data = df_ccdata[(df_ccdata['cluster_type'].str.contains('No_cluster')) & (df_ccdata['opened_on']==yesterday)]
+
+#breaking data- w/out
+cluster_data = df_ccdata[(df_ccdata['cluster_type'].str.contains('No_cluster') == False)]
+no_cluster_data = df_ccdata[(df_ccdata['cluster_type'].str.contains('No_cluster')) ]
+
+
+df_user['full_name']  = df_user['first_name'] + ' ' + df_user['last_name']
+user_name_list = list(df_user['full_name'])
+
+# custom words
+repeated_words = ['june','july','august','september','october','november','december','january','february','march','april','automation']
+stop_words = set(stopwords.words("english"))
+stop_words.update(repeated_words)
+stop_words.update(user_name_list)
+
+#construct a new list to store the cleaned text
+def clean_text(x):
+    clean_desc = []
+    for w in range(len(x)):
+        desc = x[w].lower()
+        #remove punctuation
+        desc = re.sub('[^a-zA-Z]', ' ', desc)
+        #remove tags
+        desc = re.sub("&lt;/?.*?&gt;"," &lt;&gt; ",desc)
+        #remove special characters and digits
+        desc = re.sub("(\\d|\\W)+"," ",desc)
+        split_text = desc.split()
+        #Lemmatisation
+        lem = WordNetLemmatizer()
+        split_text = [lem.lemmatize(word) for word in split_text if not word in stop_words and len(word) >2]
+        split_text = " ".join(split_text)
+        clean_desc.append(split_text)
+    return(clean_desc)
+
+#tokenizing n tagging data
+def read_corpus(X,token_only = False):
+    for x,y in enumerate(X):
+        tokens = gensim.utils.simple_preprocess(y)
+        if token_only:
+            yield tokens
+        else:
+             yield gensim.models.doc2vec.TaggedDocument(tokens, [x])
+
+x = list(no_cluster_data['free_text'])
+a = clean_text(x)
+train_corpus = list(read_corpus(a))
+
+#app_id = "8773473c"
+#app_key = "XXXXXXXX7XXXXX"
+#language = "en-us"
+#word_id = "party"
+#url = "https://od-api.oxforddictionaries.com:443/api/v2/entries/" + language + "/" + word_id.lower()
+#r = requests.get(url, headers={"app_id": app_id, "app_key": app_key})
+#relax = r.json()
+#synonyms = relax['results'][0]['lexicalEntries'][0]['entries'][0]['senses'][0]['synonyms']
+#syns_party=[]
+#for s in range(len(synonyms)):
+#    a=(synonyms[s]['text'])
+##    syns_party.append(a)
+#syns_party=clean_text(syns_party)
+#syns_party = list(read_corpus(syns_party))
+#syns_word_party = ['anniversary','ceremony','gathering','baby shower'
+#              ,'bridal shower','retreat','birthday','wedding','marraige','sweet-sixteen']
+#for i,j in syns_party:
+#    for u in i:
+#         syns_word_party.append(u)  
+#syns_word_party = [i for n, i in enumerate(syns_word_party) if i not in syns_word_party[:n]]
+#syns_word_party = [syns_word_party[0],syns_word_party[1],syns_word_party[2],syns_word_party[3],syns_word_party[4]
+#                      ,syns_word_party[5],syns_word_party[6],syns_word_party[7],syns_word_party[8],syns_word_party[9]
+ #                     ,syns_word_party[11],syns_word_party[12],syns_word_party[13],syns_word_party[16],syns_word_party[17]
+#                      ,syns_word_party[18],syns_word_party[19]]
+syns_word_party = ['anniversary','ceremony','gathering','baby shower','bridal shower','retreat','birthday','wedding','marraige',
+                    'sweet-sixteen', 'occasion', 'event','function','celebration','reunion','festivity','jamboree']
+
+# Brut force search
+f1 = []
+for x in range(len(train_corpus)):
+    for i in range(len(train_corpus[x][0])):
+            for syn in syns_word_party:
+                if 'denied' in train_corpus[x][0]:
+                    break
+                elif syn == train_corpus[x][0][i]:
+                    f1.append(x)
+                    
+res = [i for n, i in enumerate(f1) if i not in f1[:n]] 
+# putting in Data Frame
+d1 =[]
+for i in range(len(res)):
+    v = no_cluster_data.iloc[[res[i]],:]
+    d1.append(v)
+d1_party = []
+if d1 != []:
+    d1_party = pd.concat(d1)
+    d1_party['cluster_type'] = 'Party_Cluster'
+else:
+    d1_party = []
+    
+
+# language = "en-us"
+# word_id = "school"
+# url = "https://od-api.oxforddictionaries.com:443/api/v2/entries/" + language + "/" + word_id.lower()
+# r = requests.get(url, headers={"app_id": app_id, "app_key": app_key})
+# relax = r.json()
+# synonyms = relax['results'][0]['lexicalEntries'][0]['entries'][0]['senses'][0]['synonyms']
+# syns_school=[]
+# for s in range(len(synonyms)):
+#     a=(synonyms[s]['text'])
+#     syns_school.append(a)
+# syns_school=clean_text(syns_school)
+# syns_school = list(read_corpus(syns_school))
+# syns_word_school = ['daycare','school','training','academy']
+# for i,j in syns_school:
+#     for u in i:
+#          syns_word_school.append(u)
+syns_word_school = ['daycare','school','training','academy','educational','institution','centre','learning']
+# Brut force search
+f1 = []
+for x in range(len(train_corpus)):
+    for i in range(len(train_corpus[x][0])):
+        for syn in syns_word_school:
+            if syn == train_corpus[x][0][i]:
+                f1.append(x) 
+res = [i for n, i in enumerate(f1) if i not in f1[:n]] 
+# putting in Data Frame
+d1 =[]
+for i in range(len(res)):
+    v = no_cluster_data.iloc[[res[i]],:]
+    d1.append(v)
+d1_school = []
+if d1 != []:
+    d1_school = pd.concat(d1)
+    d1_school['cluster_type'] = 'School'
+else:
+    d1_school = []
+
+# language = "en-us"
+# word_id = "sport"
+# url = "https://od-api.oxforddictionaries.com:443/api/v2/entries/" + language + "/" + word_id.lower()
+# r = requests.get(url, headers={"app_id": app_id, "app_key": app_key})
+# relax = r.json()
+# synonyms = relax['results'][0]['lexicalEntries'][0]['entries'][0]['senses'][0]['synonyms']
+# syns_sports=[]
+# for s in range(len(synonyms)):
+#     a=(synonyms[s]['text'])
+#     syns_sports.append(a)
+# syns_sports=clean_text(syns_sports)
+# syns_sports = list(read_corpus(syns_sports))
+# syns_word_sports = ['wrestling','basketball','football','softball','hockey','athletics','gym','tournament','competition']
+# for i,j in syns_sports:
+#     for u in i:
+#          syns_word_sports.append(u)  
+# syns_word_sports = [i for n, i in enumerate(syns_word_sports) if i not in syns_word_sports[:n]]
+
+# syns_word_sports = [syns_word_sports[0],syns_word_sports[1],syns_word_sports[2],syns_word_sports[3],syns_word_sports[4]
+#                     ,syns_word_sports[5],syns_word_sports[6],syns_word_sports[7],syns_word_sports[8],syns_word_sports[9]
+#                     ,syns_word_sports[10],syns_word_sports[12],syns_word_sports[14]]
+syns_word_sports = ['wrestling','basketball','football','softball','hockey','athletics','gym','tournament','competition',
+                     'competitive','game','recreation','exercise']   
+# Brut force search
+f1 = []
+for x in range(len(train_corpus)):
+    for i in range(len(train_corpus[x][0])):
+        for syn in syns_word_sports:
+            if 'breathing' in train_corpus[x][0]:
+                    break
+            elif syn == train_corpus[x][0][i]:
+                f1.append(x) 
+res = [i for n, i in enumerate(f1) if i not in f1[:n]] 
+# putting in Data Frame
+d1 =[]
+for i in range(len(res)):
+    v = no_cluster_data.iloc[[res[i]],:]
+    d1.append(v)
+d1_sports = []
+if d1 != []:
+    d1_sports = pd.concat(d1)
+    d1_sports['cluster_type'] = 'Sports'
+else:
+    d1_sports = []
+
+# language = "en-us"
+# word_id = "restaurant"
+# url = "https://od-api.oxforddictionaries.com:443/api/v2/entries/" + language + "/" + word_id.lower()
+# r = requests.get(url, headers={"app_id": app_id, "app_key": app_key})
+# relax = r.json()
+# synonyms = relax['results'][0]['lexicalEntries'][0]['entries'][0]['senses'][0]['synonyms']
+# syns_restaurant =[]
+# for s in range(len(synonyms)):
+#     a=(synonyms[s]['text'])
+#     syns_restaurant.append(a)
+# syns_restaurant=clean_text(syns_restaurant)
+# syns_restaurant = list(read_corpus(syns_restaurant))
+# syns_word_restaurant = ['restaurant','tavern','club','lounge','bar']
+# for i,j in syns_restaurant:
+#     for u in i:
+#          syns_word_restaurant.append(u)  
+# syns_word_restaurant = [i for n, i in enumerate(syns_word_restaurant) if i not in syns_word_restaurant[:n]]
+# syns_word_restaurant = [syns_word_restaurant[0],syns_word_restaurant[1],syns_word_restaurant[2],syns_word_restaurant[3]
+#                        ,syns_word_restaurant[4]]
+syns_word_restaurant = ['restaurant', 'tavern', 'club', 'lounge', 'bar']
+
+# Brut force search
+f1 = []
+for x in range(len(train_corpus)):
+    for i in range(len(train_corpus[x][0])):
+        for syn in syns_word_restaurant:
+            if syn == train_corpus[x][0][i]:
+                f1.append(x) 
+res = [i for n, i in enumerate(f1) if i not in f1[:n]] 
+# putting in Data Frame
+d1 =[]
+for i in range(len(res)):
+    v = no_cluster_data.iloc[[res[i]],:]
+    d1.append(v)
+d1_restaurant = []
+if d1 != []:
+    d1_restaurant = pd.concat(d1)
+    d1_restaurant['cluster_type'] = 'Restaurant'
+else:
+    d1_restaurant = []
+
+
+# language = "en-us"
+# word_id = "homeless"
+# url = "https://od-api.oxforddictionaries.com:443/api/v2/entries/" + language + "/" + word_id.lower()
+# r = requests.get(url, headers={"app_id": app_id, "app_key": app_key})
+# relax = r.json()
+# synonyms = relax['results'][0]['lexicalEntries'][0]['entries'][0]['senses'][0]['synonyms']
+# syns_homeless =[]
+# for s in range(len(synonyms)):
+#     a=(synonyms[s]['text'])
+#     syns_homeless.append(a)
+# syns_homeless=clean_text(syns_homeless)
+# syns_homeless = list(read_corpus(syns_homeless))
+# syns_word_homeless = ['shelter']
+# for i,j in syns_homeless:
+#     for u in i:
+#          syns_word_homeless.append(u)  
+# syns_word_homeless = [i for n, i in enumerate(syns_word_homeless) if i not in syns_word_homeless[:n]]
+# syns_word_homeless = [syns_word_homeless[0],syns_word_homeless[9],syns_word_homeless[13],syns_word_homeless[14]
+#                      ,syns_word_homeless[15],syns_word_homeless[16],syns_word_homeless[17],syns_word_homeless[18]
+#                      ,syns_word_homeless[19],syns_word_homeless[20]]
+syns_word_homeless = ['shelter','homeless','beggar','vagabond','itinerant','transient','derelict','drifter','beachcomber']
+# Brut force search
+f1 = []
+for x in range(len(train_corpus)):
+    for i in range(len(train_corpus[x][0])):
+        for syn in syns_word_homeless:
+            if syn == train_corpus[x][0][i]:
+                f1.append(x) 
+res = [i for n, i in enumerate(f1) if i not in f1[:n]] 
+# putting in Data Frame
+d1 =[]
+for i in range(len(res)):
+    v = no_cluster_data.iloc[[res[i]],:]
+    d1.append(v)
+d1_homeless= []
+if d1 != []:
+    d1_homeless = pd.concat(d1)
+    d1_homeless['cluster_type'] = 'Homeless'
+else:
+    d1_homeless = []
+
+
+# language = "en-us"
+# word_id = "factory"
+# url = "https://od-api.oxforddictionaries.com:443/api/v2/entries/" + language + "/" + word_id.lower()
+# r = requests.get(url, headers={"app_id": app_id, "app_key": app_key})
+# relax = r.json()
+# synonyms = relax['results'][0]['lexicalEntries'][0]['entries'][0]['senses'][0]['synonyms']
+# syns_factory =[]
+# for s in range(len(synonyms)):
+#     a=(synonyms[s]['text'])
+#     syns_factory.append(a)
+# syns_factory=clean_text(syns_factory)
+# syns_factory = list(read_corpus(syns_factory))
+# syns_word_factory = ['factory','industry','manufacturing']
+# for i,j in syns_factory:
+#     for u in i:
+#          syns_word_factory.append(u)  
+# syns_word_factory = [i for n, i in enumerate(syns_word_factory) if i not in syns_word_factory[:n]]
+# syns_word_factory = [syns_word_factory[0],syns_word_factory[1],syns_word_factory[2],syns_word_factory[4]
+#                     ,syns_word_factory[5],syns_word_factory[7],syns_word_factory[8],syns_word_factory[9]]
+syns_word_factory = ['factory','industry','manufacturing','plant','yard','mill','industrial']
+
+# Brut force search
+f1 = []
+for x in range(len(train_corpus)):
+    for i in range(len(train_corpus[x][0])):
+        for syn in syns_word_factory:
+            if 'pond' in train_corpus[x][0]:
+                break
+            elif syn == train_corpus[x][0][i]:
+                f1.append(x) 
+res = [i for n, i in enumerate(f1) if i not in f1[:n]] 
+# putting in Data Frame
+d1 =[]
+for i in range(len(res)):
+    v = no_cluster_data.iloc[[res[i]],:]
+    d1.append(v)
+d1_factory = []
+if d1 != []:
+    d1_factory = pd.concat(d1)
+    d1_factory['cluster_type'] = 'Factory'
+else:
+    d1_factory = []
+
+
+# language = "en-us"
+# word_id = "religion"
+# url = "https://od-api.oxforddictionaries.com:443/api/v2/entries/" + language + "/" + word_id.lower()
+# r = requests.get(url, headers={"app_id": app_id, "app_key": app_key})
+# relax = r.json()
+# synonyms = relax['results'][0]['lexicalEntries'][0]['entries'][0]['senses'][0]['synonyms']
+# syns_relegious =[]
+# for s in range(len(synonyms)):
+#     a=(synonyms[s]['text'])
+#     syns_relegious.append(a)
+# syns_relegious=clean_text(syns_relegious)
+# syns_relegious = list(read_corpus(syns_relegious))
+# syns_word_relegious = ['church','congregation','communion','funeral','mass','wake','viewing','mitzvah']
+# for i,j in syns_relegious:
+#     for u in i:
+#          syns_word_relegious.append(u)  
+# syns_word_relegious = [i for n, i in enumerate(syns_word_relegious) if i not in syns_word_relegious[:n]] 
+# syns_word_relegious = [syns_word_relegious[0],syns_word_relegious[1],syns_word_relegious[2],syns_word_relegious[3]
+#                        ,syns_word_relegious[4],syns_word_relegious[5],syns_word_relegious[6],syns_word_relegious[7],
+#                        syns_word_relegious[11]]
+syns_word_relegious = ['church','congregation','communion','funeral','mass','wake','viewing','mitzvah','worship']
+
+
+# Brut force search
+f1 = []
+for x in range(len(train_corpus)):
+    for i in range(len(train_corpus[x][0])):
+        for syn in syns_word_relegious:
+            if syn == train_corpus[x][0][i]:
+                f1.append(x) 
+res = [i for n, i in enumerate(f1) if i not in f1[:n]] 
+# putting in Data Frame
+d1 =[]
+for i in range(len(res)):
+    v = no_cluster_data.iloc[[res[i]],:]
+    d1.append(v)
+d1_religion = []
+if d1 != []:
+    d1_religion = pd.concat(d1)
+    d1_religion['cluster_type'] = 'Religious'
+else:
+    d1_religion = []
+    
+
+if list(d1_sports) != []:
+    df_final = d1_sports
+    if list(d1_restaurant) != []:
+        df_final = pd.concat([df_final,d1_restaurant])
+        if list(d1_religion) != []:
+            df_final = pd.concat([df_final,d1_religion])
+            if list(d1_party) != []:
+                df_final = pd.concat([df_final,d1_party])
+                if list(d1_factory) != []:
+                    df_final = pd.concat([df_final,d1_factory])
+                    if list(d1_school) != []:
+                        df_final = pd.concat([df_final,d1_school])
+elif list(d1_restaurant) != []:
+    df_final = d1_restaurant
+    if list(d1_religion) != []:
+            df_final = pd.concat([df_final,d1_religion])
+            if list(d1_party) != []:
+                df_final = pd.concat([df_final,d1_party])
+                if list(d1_factory) != []:
+                    df_final = pd.concat([df_final,d1_factory])
+                    if list(d1_school) != []:
+                        df_final = pd.concat([df_final,d1_school])
+elif list(d1_religion) != []:
+    df_final = d1_religion
+    if list(d1_party) != []:
+                df_final = pd.concat([df_final,d1_party])
+                if list(d1_factory) != []:
+                    df_final = pd.concat([df_final,d1_factory])
+                    if list(d1_school) != []:
+                        df_final = pd.concat([df_final,d1_school])
+elif list(d1_party) != []:
+    df_final = d1_party
+    if list(d1_factory) != []:
+        df_final = pd.concat([df_final,d1_factory])
+        if list(d1_school) != []:
+            df_final = pd.concat([df_final,d1_school])
+elif list(d1_factory) != []:
+    df_final = d1_factory
+    if list(d1_school) != []:
+        df_final = pd.concat([df_final,d1_school])
+elif list(d1_school) != []:
+    df_final = d1_school
+else:
+    df_final = pd.DataFrame()
+
+cluster_data = pd.concat([df_final,cluster_data])
+cluster_data['uid'] = cluster_data['first_name'] + " " +cluster_data['last_name'] +" "+ cluster_data['dob']
+cluster_data_clean = cluster_data.drop_duplicates(['uid'])
+df_contacts['name_and_id'] = df_contacts['name_and_id'].astype(str,copy= True,errors='raise') 
+df_contacts_n =  df_contacts.groupby(['Parent_case_ID'])['name_and_id'].apply(lambda x: ','.join(x))
+x = pd.DataFrame(df_contacts_n)
+x.reset_index(inplace= True)
+clean_data = cluster_data_clean.merge(x,how = 'left',left_on= 'id',right_on='Parent_case_ID',copy= True)
+clean_data .to_sql('cluster_data',conn_hcs,if_exists='replace',index=False)
+
